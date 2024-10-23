@@ -249,51 +249,7 @@ print(p1)
 
 ```
 
-# 3) DIAGNOSTIC
 
-## 3.1) Trace plots
-
-```{r}
-beta_post_mcmc   = as.mcmc(out$beta_post)
-sigma2_post_mcmc = as.mcmc(out$sigma2_post)
-
-# Traccia i plot
-traceplot(beta_post_mcmc)
-traceplot(sigma2_post_mcmc)
-```
-## 3.2) Autocorrelation tests
-
-```{r}
-coda::autocorr.plot(beta_post_mcmc)
-coda::autocorr.plot(sigma2_post_mcmc)
-```
-
-## 3.3) Geweke test
-
-```{r}
-geweke_beta <- apply(beta_post_mcmc, 2, function(x) geweke.diag(mcmc(x)))
-geweke_sigma2 <- geweke.diag(mcmc(sigma2_post_mcmc))
-
-# Estrai i valori z
-z_scores_beta <- sapply(geweke_beta, function(x) x$z)
-z_scores_sigma2 <- geweke_sigma2$z
-
-# Convertire i risultati in data frame per ggplot2
-df_beta <- data.frame(Parameter = paste0("Beta[", 1:6, "]"), Z_Score = z_scores_beta)
-df_sigma2 <- data.frame(Parameter = "Sigma2", Z_Score = z_scores_sigma2)
-
-# Combinare i data frame
-df_combined <- rbind(df_beta, df_sigma2)
-
-# Grafico dei valori z del test di Geweke
-ggplot(df_combined, aes(x = Parameter, y = Z_Score)) +
-  geom_point(alpha = 0.5) +
-  geom_hline(yintercept = c(-1.96, 1.96), linetype = "dashed", color = "red") +
-  labs(title = "Geweke Diagnostic Z-Scores",
-       x = "Parameter",
-       y = "Z-Score") +
-  theme_minimal()
-```
 
 # 4) MODEL / VARIABLE SELECTION
 
