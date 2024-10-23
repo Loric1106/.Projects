@@ -1,0 +1,118 @@
+---
+title: "bo 2 prova"
+author: "Lorenzo Ricciardulli"
+date: "2024-07-09"
+output: html_document
+---
+
+```{r}
+set.seed(123)
+X = as.matrix(data_X)
+vettore <- matrix(1, nrow = 768, ncol = 1)
+X = cbind(vettore,X)
+A = X[,c(1,4,7,8,9)] ## non correlati
+B = X[,c(2,3,5,6)]  # correlati
+
+q = ncol(A)   ## non correlati
+t = ncol(B)    # correlati
+X = cbind(A,B)
+P = ncol(X)
+W <- cov(B)/10# Scale matrix for the Wishart distribution
+
+df <- 4
+
+# Libraries
+library(rjags)
+library(coda)
+
+# Definizione della funzione che restituisce il modello JAGS come stringa
+jags_model_string <- function() {
+  return("
+    model {
+      # Likelihood
+      for (i in 1:N) {
+        y[i] ~ dnorm(mu[i], tau)
+        mu[i] <- inprod(X[i,], beta)
+      }
+
+      # Priors for non-correlated betas
+      for (j in 1:q) {
+        beta[j] <- gamma[j] * beta_raw[j]
+        beta_raw[j] ~ dnorm(0, 0.1)
+      }
+
+      # Priors for correlated betas
+      for (j in (q+1):(q+t)) {
+        beta[j] <- gamma[j] * beta_raw[j]
+      }
+      beta_raw[(q+1):(q+t)] ~ dmnorm(mu_beta[(q+1):(q+t)], Tau[1:t, 1:t])
+
+      # Prior for the precision matrix Tau of correlated betas
+      Tau[1:t, 1:t] ~ dwish(W[,], df)
+      Sigma[1:t, 1:t] <- inverse(Tau[1:t, 1:t])  # Covariance matrix of correlated betas
+
+      # Hyperpriors for the mean and covariance of correlated betas
+      for (j in (q+1):(q+t)) {
+        mu_beta[j] <- 0
+      }
+
+      # Prior for the observation precision
+      tau ~ dgamma(0.01, 0.01)
+      sigma2 <- 1/tau  # Observation variance
+      
+      # Priors for gamma
+      for (j in 1:P) {
+        gamma[j] ~ dbern(w)
+      }
+
+      w ~ dbeta(1, 1)
+    }
+  ")
+}
+
+
+# Dati per JAGS
+data_jags <- list(N = nrow(X), P = ncol(X), X = X, y = y, W = W, df = df, q = q, t = t)
+
+# Valori iniziali
+inits <- function() {
+  list(
+    beta_raw = rnorm(P, 0, 1),
+    tau = rgamma(1, 0.1, 0.1),
+    gamma = rbinom(P, 1, 0.5)  # Inizializzazione variabile
+  )
+}
+
+# Parametri da monitorare
+parameters <- c("beta", "tau", "deviance")
+
+# Compila e esegui il modello JAGS
+model_string <- jags_model_string()
+model <- jags.model(textConnection(model_string), data = data_jags, inits = inits, n.chains = 1)
+update(model, 100)  # Burn-in
+samples <- coda.samples(model, variable.names = parameters, n.iter = 1000)
+
+# Stampa il sommario dei risultati
+print(summary(samples))
+
+# Estrai i campioni MCMC per gamma
+beta_post = as.matrix(coda.samples(model, variable.names = "beta", n.iter = 1000))
+gamma_post = as.matrix(coda.samples(model, variable.names = "gamma", n.iter = 1000))
+
+# Calcola la proporzione di inclusione per ciascun predittore
+prob_inclusion <- colMeans(gamma_post)
+
+# Nomina le proporzioni con i nomi delle variabili
+names(prob_inclusion) <- c("Intercept", colnames(X)[-1])
+
+
+
+# Plot delle proporzioni di inclusione
+par(mfrow = c(1, 1), mar = c(5, 5, 2, 2))
+barplot_heights <- barplot(prob_inclusion, col = "brown3", ylab = expression(hat(p)[j]), space = 0.4, names.arg = rep("", length(prob_inclusion)))
+
+# Aggiungere le etichette verticali
+text(x = barplot_heights, y = par("usr")[3] - 0.01, srt = 90, adj = 1, labels = names(prob_inclusion), xpd = TRUE, cex = 0.7)
+
+```
+

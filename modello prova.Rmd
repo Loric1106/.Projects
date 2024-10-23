@@ -1,0 +1,115 @@
+---
+title: "Metodo 2"
+author: "Lorenzo Ricciardulli"
+date: "2024-07-10"
+output: html_document
+---
+```{r message=FALSE, warning=FALSE}
+library(ggplot2)
+library(GGally)
+library(leaps)
+library(ISLR)
+library(readxl)
+library(combinat)
+library(mvtnorm)
+library(coda)
+library(corrplot)
+library(dplyr)
+library(tidyr)
+library(rjags)
+library(rstan)
+library(R2jags)
+library(bbricks)
+library(LaplacesDemon)
+library(here)
+library(rstanarm)
+options(mc.cores = parallel::detectCores())
+library(loo)
+library(projpred)
+library(ggplot2)
+library(bayesplot)
+theme_set(bayesplot::theme_default(base_family = "sans"))
+library(corrplot)
+library(knitr)
+library(copula)
+library(rstan)
+library(MASS)
+```
+
+
+```{r}
+set.seed(42)
+
+# Carica il dataset
+data = read_excel('energy efficiency.xlsx', sheet = 1)
+data = data[,-10]
+
+# Verifica la struttura del dataset
+str(data)
+
+# Separare le variabili predittive (X) e la variabile di risposta (Y)
+X <- data[, 1:8]
+Y <- data[, 9]
+```
+```{r}
+# Stima delle distribuzioni marginali usando KDE
+marginals <- lapply(data, function(col) {
+  fit <- density(col)
+  list(cdf = approxfun(fit$x, cumsum(fit$y) / sum(fit$y)),
+       inv_cdf = approxfun(cumsum(fit$y) / sum(fit$y), fit$x))
+})
+
+# Trasformazione in Uniformi
+uniform_data <- data.frame(lapply(1:ncol(data), function(i) {
+  marginals[[i]]$cdf(data[[i]])
+}))
+```
+
+```{r}
+# Adattamento della Copula Normale
+fit_copula <- fitCopula(normalCopula(dim = ncol(data)), uniform_data, method = "ml")
+
+# Simulazione di dati dalla copula adattata
+simulated_uniform <- rCopula(nrow(data), fit_copula@copula)
+
+# Trasformazione inversa dei dati simulati nello spazio originale
+simulated_data <- data.frame(lapply(1:ncol(data), function(i) {
+  marginals[[i]]$inv_cdf(simulated_uniform[, i])
+}))
+
+# Rinomina le colonne del dataset simulato
+colnames(simulated_data) <- colnames(data)
+
+# Regressione lineare bayesiana usando rstan
+stan_code <- "
+data {
+  int<lower=0> n; // number of observations
+  int<lower=0> p; // number of predictors
+  matrix[n, p] X; // predictor matrix
+  vector[n] y; // response vector
+}
+parameters {
+  vector[p] beta; // coefficients
+  real<lower=0> sigma; // error scale
+}
+model {
+  y ~ normal(X * beta, sigma);
+}
+"
+
+# Prepara i dati per Stan
+stan_data <- list(
+  n = nrow(simulated_data),
+  p = ncol(simulated_data) - 1,
+  X = as.matrix(simulated_data[, 1:8]),
+  y = as.vector(simulated_data$Y)
+)
+
+# Esegui il campionamento MCMC
+fit <- stan(model_code = stan_code, data = stan_data, 
+            iter = 2000, chains = 4)
+
+# Stampa il riepilogo dei posteriori
+print(fit)
+```
+

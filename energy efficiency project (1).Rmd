@@ -1,0 +1,435 @@
+---
+title: "energy efficiency project"
+author: "Ilaria Crippa"
+date: "2024-06-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE}
+library(ggplot2)
+library(GGally)
+library(leaps)
+library(ISLR)
+library(readxl)
+library(combinat)
+library(mvtnorm)
+library(coda)
+library(corrplot)
+library(dplyr)
+library(tidyr)
+```
+
+# Data cleaning 
+
+```{r}
+data = read_excel('energy efficiency.xlsx', sheet = 1)
+data = data[,-10]
+y = data$heating.load 
+data_X = data[,1:8] 
+```
+
+# Data visualization
+
+```{r}
+par(mfrow=c(1,2))
+hist(data$heating.load)
+```
+
+```{r}
+#correlation matrix
+
+selected_variables <- c("relative.compactness", "surface.area", "wall.area", "roof.area", "overall.height", "glazing.area", "heating.load")
+selected_data <- data[, selected_variables]
+correlation_matrix <- cor(selected_data)
+corrplot(correlation_matrix[, 1:7], tl.col = 'darkblue')
+```
+
+# Regression
+
+## marginal and posterior functions
+
+```{r}
+posterior_linear_conjugate = function(y, X, beta.0, V, a, b, S){
+  library(mvtnorm)
+  n = nrow(X)
+  p = ncol(X)
+  V.n    = V + t(X)%*%X
+  beta.n = solve(V + t(X)%*%X)%*%(V%*%beta.0 + t(X)%*%y)
+  a.n = a + n
+  b.n = b + t(y)%*%y + beta.0%*%V%*%beta.0 - t(beta.n)%*%(V + t(X)%*%X)%*%beta.n
+  beta_post   = matrix(NA, S, p)
+  sigma2_post = matrix(NA, S, 1)
+  for(s in 1:S){
+    tau  = rgamma(1, a.n/2, b.n/2)
+    sigma2 = 1/tau
+    beta = c(rmvnorm(1, beta.n, solve(V.n)/tau))
+    beta_post[s,]   = beta
+    sigma2_post[s,] = sigma2
+  }
+  return(posterior = list(beta_post   = beta_post,
+                          sigma2_post = sigma2_post))
+}
+
+marg_like_regr = function(y, X, beta.0, V, a, b){
+  X = as.matrix(X)
+  V = as.matrix(V)
+  n = nrow(X)
+  p = ncol(X)
+  V.n    = V + t(X)%*%X
+  beta.n = solve(V + t(X)%*%X)%*%(V%*%beta.0 + t(X)%*%y)
+  a.n = a + n
+  b.n = b + t(y)%*%y + beta.0%*%V%*%beta.0 - t(beta.n)%*%(V + t(X)%*%X)%*%beta.n
+  m = -n/2*log(2*pi) + a/2*log(b/2) - a.n/2*log(b.n/2) +
+        lgamma(a.n/2) - lgamma(a/2) +
+          log(det(V))/2 - log(det(V.n))/2
+  return(m)
+}
+```
+
+## sampling posterior of beta comma tau given y
+
+```{r}
+X = model.matrix(y ~., data_X)
+p = ncol(X)
+head(X)
+beta.0 = rep(0, p)
+V      = diag(0.01, p)
+a      = 0.01
+b      = 0.01
+S = 5000
+out = posterior_linear_conjugate(y, X, beta.0, V, a, b, S = S)
+str(out)
+beta_post = out$beta_post
+sigma2_post = out$sigma2_post
+```
+
+## plots
+
+```{r}
+par(mar = c(3,5,1,1))
+
+boxplot(out$beta_post, outline = F, ylim = c(-550,550), ylab = expression(beta), las = 1)
+abline(h = 0, col = "blue", lty = "dashed")
+out_lm = summary(lm(y ~ X - 1))
+points(out_lm$coefficients[,1], col = "blue", pch = 16)
+
+par(mar = c(3,5,1,1))
+
+boxplot(out$beta_post, outline = F, ylim = c(-80,80), ylab = expression(beta), las = 1)
+abline(h = 0, col = "blue", lty = "dashed")
+out_lm = summary(lm(y ~ X - 1))
+points(out_lm$coefficients[,1], col = "blue", pch = 16)
+```
+
+## model selection
+
+```{r}
+## Find all the possible distinct models with q predictors, q = 1,2,3,...
+
+
+
+set = 2:p # labels of variables (intercept, i.e. variable 1 is always included)
+
+combn(set, 1)
+
+1:length(set)
+
+comb = unlist(lapply(1:length(set), combinat::combn, x = set, simplify = FALSE), recursive = FALSE)
+
+tail(comb)
+
+## Obs: the intercept X[,1] must be included in each the 2^9 models
+
+## We add it and also include the model with the intercept only
+
+all.comb = mapply(append, 1, comb, SIMPLIFY = FALSE)
+
+all.models.index = append(1, all.comb)
+head(all.models.index)
+
+
+##################################
+## Compute marginal likelihoods ##
+##################################
+
+all.log.marg.like = c()
+
+K = length(all.models.index)
+
+beta.0 = rep(0, p)
+V      = diag(0.01, p)
+a      = 0.01
+b      = 0.01
+
+k = 1
+
+for(k in 1:K){
+  
+  set.k = all.models.index[[k]]
+  
+  all.log.marg.like[k] = marg_like_regr(y, X[,set.k], beta.0[set.k], V[set.k,set.k], a, b)
+  
+}
+
+## Obs: we assume the uniform prior on M_k
+
+all.marg.like = exp(all.log.marg.like)
+
+post.model.probs = all.marg.like/sum(all.marg.like)
+
+
+# alternative: use scale!
+
+scale(all.log.marg.like, center = TRUE, scale = FALSE)
+
+const = mean(all.log.marg.like)
+
+post.model.probs = exp(all.log.marg.like - const)/sum(exp(all.log.marg.like - const))
+
+names(post.model.probs) = all.models.index
+
+head(post.model.probs)
+
+round(post.model.probs, 3)
+
+head(sort(post.model.probs, decreasing = TRUE))
+
+par(mar=c(5,12,1,1))
+barplot(sort(post.model.probs, decreasing = TRUE)[1:10], horiz = TRUE, las = 2, xlim = c(0,1), col = rainbow(8))
+
+# Compare with BSS and with R squared and adjusted R squared
+
+#####
+#####
+
+set = 1:3
+
+lapply(1:length(set), combinat::combn, x = set, simplify = FALSE)
+lapply(1:length(set), combinat::combn, x = set, simplify = TRUE)
+
+comb = unlist(lapply(1:length(set), combinat::combn, x = set, simplify = FALSE), recursive = FALSE)
+```
+
+# SEMICONJUGATE
+
+## Data cleaning
+
+```{r}
+data = read_excel('energy efficiency.xlsx', sheet = 1)
+data = data[,-10]
+y = data$heating.load 
+data_X = data[,1:8] 
+X = as.matrix(cbind(1,data_X))
+n = nrow(X)
+```
+
+## fixing hyperparameters 
+
+```{r}
+p = ncol(X)
+
+Sigma0 = diag(100, p)
+beta0  = rep(0, p)
+
+nu0 = 0.01
+s20 = 1
+```
+
+## Suppose sigma2 is given
+## We can sample from the full conditional of beta as
+
+```{r}
+sigma2 = 1
+
+A1 = solve(Sigma0) + t(X)%*%X/sigma2
+
+b1 = solve(Sigma0)%*%beta0 + t(X)%*%y/sigma2
+
+beta = c(rmvnorm(1, solve(A1)%*%b1, solve(A1)))
+beta
+```
+## Suppose beta is given
+## We can sample from the full conditional of gamma = sigma2^-1 as
+
+```{r}
+RSS = t(y - X%*%beta)%*%(y - X%*%beta)
+RSS
+
+gamma = rgamma(1, n/2 + nu0/2, nu0*s20/2 + RSS/2) ## b updated = 
+gamma
+
+sigma2 = rgamma(1, n/2 + nu0/2, nu0*s20/2 + RSS/2)^(-1)
+
+sigma2
+```
+```{r}
+gibbs_linear = function(y, X, beta0, Sigma0, nu0, s20, S){
+  
+  n = nrow(X)
+  p = ncol(X)
+  
+  ## To store samples drawn from the posterior of (beta, sigma2)
+  
+  beta_post   = matrix(NA, S, p)
+  sigma2_post = matrix(NA, S, 1)
+  
+  
+  ########################
+  ## Set initial values ##
+  ########################
+  
+  lambda <- 1e-5  # Una piccola costante
+  beta <- solve(t(X) %*% X + lambda * diag(ncol(X))) %*% t(X) %*% y
+  sigma2 = c(t(y - X%*%beta)%*%(y - X%*%beta)/(n - p - 1))
+  
+  
+  ###################
+  ## Gibbs sampler ##
+  ###################
+  
+  for(s in 1:S){
+    
+    #############################################
+    ## (1) Sample beta conditionally on sigma2 ##
+    #############################################
+    
+    A1 = solve(Sigma0) + t(X)%*%X/sigma2
+    b1 = solve(Sigma0)%*%beta0 + t(X)%*%y/sigma2
+    
+    beta = c(rmvnorm(1, solve(A1)%*%b1, solve(A1)))
+    
+    #############################################
+    ## (2) Sample sigma2 conditionally on beta ##
+    #############################################
+    
+    RSS = t(y - X%*%beta)%*%(y - X%*%beta)
+    
+    gamma  = rgamma(1, n/2 + nu0/2, nu0*s20/2 + RSS/2)
+    sigma2 = gamma^(-1)
+    
+    #########################
+    ## Store sampled draws ##
+    #########################
+    
+    beta_post[s,]   = beta
+    sigma2_post[s,] = sigma2
+    
+  }
+  
+  return(posterior = list(beta_post   = beta_post,
+                          sigma2_post = sigma2_post))
+  
+  
+}
+out = gibbs_linear(y, X, beta0, Sigma0, nu0, s20, S = 1000)
+
+
+```
+
+## trace plot
+
+```{r}
+beta_post_mcmc   = as.mcmc(out$beta_post)
+sigma2_post_mcmc = as.mcmc(out$sigma2_post)
+
+# Traccia i plot
+traceplot(beta_post_mcmc)
+traceplot(sigma2_post_mcmc)
+```
+## autocorrelation
+
+```{r}
+autocorr.plot(beta_post_mcmc)
+autocorr.plot(sigma2_post_mcmc)
+```
+## credible intervals
+
+```{r}
+post.means = apply(beta_post_mcmc[,1:9],2, mean)
+CI = apply(beta_post_mcmc[,1:9], 2, function(x) quantile(x, c(0.025, 0.975)))
+
+posterior_draws = pivot_longer(as.data.frame(beta_post_mcmc[,1:9]), cols = 1:9) %>% 
+  arrange(name) %>% 
+  mutate(density = "posterior")
+head(posterior_draws)
+colnames(posterior_draws) = c("parameter", "value", "density")
+
+prior_draws = data.frame(parameter = rep(c("V1", "V2", "V3", "V4", "V5", "V6", "V7", "V8", "V9"), each = 1000),
+                         value = rnorm(9 * 1000, 0, 100),
+                         density = rep("prior", 9 * 1000))
+
+draws = rbind(posterior_draws, prior_draws)
+
+# Plot the densities
+p1 = ggplot(draws, aes(x = value, colour = density, fill = density)) + 
+  geom_density(alpha = 0.2) + xlim(c(-50,50)) +
+  theme(aspect.ratio = 1) + 
+  theme_bw() + 
+  scale_fill_manual(values = c("prior" = "darkgreen", "posterior" = "red")) + 
+  scale_color_manual(values = c("prior" = "darkgreen", "posterior" = "red")) + 
+  facet_wrap(~parameter, scales = "free") + 
+  labs(title = "Prior and Posterior Densities of Coefficients",
+       x = "Value", y = "Density"); p1
+```
+
+```{r}
+CI_df = data.frame(
+  parameter = rep(paste0("V", 1:9), each = 2),
+  quantile = c(CI),
+  quantile_name = rep(c("lower", "upper"), 9)
+)
+
+# Plot the densities with confidence interval lines
+ggplot(draws, aes(x = value, colour = density, fill = density)) + 
+  geom_density(alpha = 0.2)+  xlim(c(-20,20)) + 
+  geom_vline(data = CI_df, aes(xintercept = quantile, linetype = quantile_name), colour = "blue") +
+  scale_linetype_manual(values = c("lower" = "dashed", "upper" = "dotted")) +
+  theme(aspect.ratio = 1) + 
+  theme_bw() + 
+  scale_fill_manual(values = c("prior" = "darkgreen", "posterior" = "red")) + 
+  scale_color_manual(values = c("prior" = "darkgreen", "posterior" = "red")) + 
+  facet_wrap(~parameter, scales = "free") + 
+  labs(title = "Prior and Posterior Densities of Coefficients",
+       x = "Value", y = "Density")
+```
+
+
+## posterior summaries and plots
+
+```{r}
+par(mar = c(3,5,1,1))
+
+boxplot(out$beta_post, outline = F, ylim = c(-550,550), ylab = expression(beta), las = 1)
+abline(h = 0, col = "blue", lty = "dashed")
+out_lm = summary(lm(y ~ X - 1))
+points(out_lm$coefficients[,1], col = "blue", pch = 16)
+
+par(mar = c(3,5,1,1))
+
+boxplot(out$beta_post, outline = F, ylim = c(-80,80), ylab = expression(beta), las = 1)
+abline(h = 0, col = "blue", lty = "dashed")
+out_lm = summary(lm(y ~ X - 1))
+points(out_lm$coefficients[,1], col = "blue", pch = 16)
+```
+
+```{r}
+filtered_df <- data %>% filter(orientation == 3)
+
+# Calculate the mean of the desired column, e.g., 'your_column'
+mean_value_east <- mean(filtered_df$heating.load, na.rm = TRUE)
+
+mean_value_east
+
+
+filtered_df <- data %>% filter(orientation == 5)
+
+mean_value_west <- mean(filtered_df$heating.load, na.rm = TRUE)
+
+mean_value_west
+```
+
+

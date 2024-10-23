@@ -1,0 +1,611 @@
+---
+title: "nuovo modello"
+author: "Lorenzo Ricciardulli"
+date: "2024-07-10"
+output: html_document
+---
+```{r}
+library(corrplot)
+library(ggplot2)
+library(GGally)
+library(leaps)
+library(ISLR)
+library(readxl)
+library(combinat)
+library(mvtnorm)
+library(coda)
+library(corrplot)
+library(dplyr)
+library(tidyr)
+library(rjags)
+library(rstan)
+library(R2jags)
+library(bbricks)
+library(LaplacesDemon)
+```
+
+# 1) DATA VISUALIZATION AND CLEANING
+
+## 1.1) Data loading and cleaning (dummy variable)
+
+```{r}
+data = read.csv("Student_Performance.csv")
+data$Extracurricular.Activities = ifelse(data$Extracurricular.Activities == "Yes", 1, 0)
+str(data)
+```
+
+## 1.2) Data visualization (hists and boxplot)
+
+```{r}
+par(mfrow = c(2,3))
+hist(data[,1])
+hist(data[,2])
+hist(data[,4])
+hist(data[,5])
+hist(data[,6])
+```
+
+```{r}
+boxplot(data$Performance.Index ~ data$Extracurricular.Activities)
+```
+
+
+# 2) REGRESSION
+
+
+## 2.1) Samples of beta posterior and tau POST
+
+### 2.1.1) Function
+```{r}
+############################################
+## Linear regression with conjugate prior ##
+############################################
+
+#################################################################
+## Posterior inference for the linear model (conjugate priors) ##
+#################################################################
+
+posterior_linear_conjugate = function(y, X, beta.0, V, a, b, S){
+  
+  ###########
+  ## Input ##
+  ###########
+  
+  # y     : response variable, (n,1) vector
+  # X     : (n,p) design matrix, each column is one predictor, column one is the unit vector
+  
+  # beta.0, V : hyperparameters of the Multivariate Normal prior on beta
+  # a, b      : hyperparameters of the Gamma prior on tau
+  
+  # S : number of MCMC iterations
+  
+  ############
+  ## Output ##
+  ############
+  
+  # out : a list with two elements:
+  # beta_post   : (S,p) matrix, each row is a draw from the posterior of beta = (beta_1, ..., beta_p)
+  # sigma2_post : (S,1) matrix, each row is a draw from the posterior of sigma2 = tau^{-1}
+  
+  
+  library(mvtnorm)
+  
+  n = nrow(X)
+  p = ncol(X)
+  
+  ## Compute posterior hyperparameters
+  
+  V.n    = V + t(X)%*%X
+  beta.n = solve(V + t(X)%*%X)%*%(V%*%beta.0 + t(X)%*%y)
+  
+  a.n = a + n
+  b.n = b + t(y)%*%y + beta.0%*%V%*%beta.0 - t(beta.n)%*%(V + t(X)%*%X)%*%beta.n
+  
+  ## To store samples drawn from the posterior of (beta, sigma2)
+  
+  beta_post   = matrix(NA, S, p)
+  sigma2_post = matrix(NA, S, 1)
+  
+  ###################
+  ## Gibbs sampler ##
+  ###################
+  
+  for(s in 1:S){
+    
+    #######################
+    ## (1) Sample sigma2 ##
+    #######################
+    
+    tau  = rgamma(1, a.n/2, b.n/2)
+    sigma2 = 1/tau
+    
+    ##########################################
+    ## (2) Sample beta conditionally on tau ##
+    ##########################################
+    
+    beta = c(rmvnorm(1, beta.n, solve(V.n)/tau))
+    
+    #########################
+    ## Store sampled draws ##
+    #########################
+    
+    beta_post[s,]   = beta
+    sigma2_post[s,] = sigma2
+    
+  }
+  
+  return(posterior = list(beta_post   = beta_post,
+                          sigma2_post = sigma2_post))
+  
+  
+}
+```
+
+### 2.1.2) Data preparation for function
+
+```{r}
+y = data$Performance.Index ## response variable
+data_X = data[,-6]
+X = model.matrix(y ~., data_X)
+p = ncol(X)
+beta.0 = rep(0,p)
+V      = diag(0.1, p)
+a      = 0.01
+b      = 0.01
+S = 5000
+```
+
+### 2.1.3) Sampling beta comma tau POST
+
+```{r}
+out = posterior_linear_conjugate(y = y, X = X, beta.0, V, a, b, S = S)
+str(out)
+beta_post = out$beta_post
+sigma2_post = out$sigma2_post
+
+beta_post_mcmc = as.mcmc(beta_post)
+sigma2_post_mcmc = as.mcmc(sigma2_post)
+
+colMeans(beta_post_mcmc)
+colMeans(sigma2_post_mcmc)
+```
+ 
+
+## 2.2) Boxplots of beta post mcmc
+
+```{r}
+par(mar = c(3,5,1,1))
+
+boxplot(out$beta_post, outline = F, ylim = c(-550,550), ylab = expression(beta), las = 1)
+abline(h = 0, col = "blue", lty = "dashed")
+out_lm = summary(lm(y ~ X - 1))
+points(out_lm$coefficients[,1], col = "blue", pch = 16)
+
+par(mar = c(3,5,1,1))
+
+boxplot(out$beta_post, outline = F, ylim = c(-50,5), ylab = expression(beta), las = 1)
+abline(h = 0, col = "blue", lty = "dashed")
+out_lm = summary(lm(y ~ X - 1))
+points(out_lm$coefficients[,1], col = "blue", pch = 16)
+```
+
+## 2.3) Credible intervals
+
+```{r}
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+
+# Sample data for the posterior draws (replace with your actual posterior MCMC samples)
+set.seed(123)
+
+# Calculate means and credible intervals for the posterior samples
+post.means <- apply(beta_post_mcmc[,1:6], 2, mean)
+CI <- apply(beta_post_mcmc[,1:6], 2, function(x) quantile(x, c(0.025, 0.975)))
+
+# Prepare posterior draws for plotting
+posterior_draws <- pivot_longer(as.data.frame(beta_post_mcmc[,1:6]), cols = 1:6) %>% 
+  arrange(name) %>% 
+  mutate(density = "posterior")
+colnames(posterior_draws) <- c("parameter", "value", "density")
+
+# Define prior means and standard deviations (conjugate normal prior)
+taur <- rgamma(1000, 0.01, 0.01)
+
+# Inspect taur values
+summary(taur)
+
+# Adjust prior standard deviations to avoid excessive dispersion
+adjusted_taur <- sqrt(taur)
+prior_means <- rep(0, 6)  # Assuming zero mean for simplicity
+prior_sds <- rep(10, 6)   # Assuming standard deviation of 10 for simplicity
+
+# Generate prior draws
+prior_draws <- data.frame(
+  parameter = rep(c("V1", "V2", "V3", "V4", "V5", "V6"), each = 1000),
+  value = unlist(lapply(1:6, function(i) rnorm(1000, prior_means[i], prior_sds[i] * (1 / adjusted_taur[i])))),
+  density = rep("prior", 6 * 1000)
+)
+
+# Combine prior and posterior draws
+draws <- rbind(posterior_draws, prior_draws)
+
+
+
+# Plot the densities
+p1 <- ggplot(draws, aes(x = value, colour = density, fill = density)) + 
+  geom_density(alpha = 0.2) + 
+  xlim(c(-50,50)) +
+  theme(aspect.ratio = 1) + 
+  theme_bw() + 
+  scale_fill_manual(values = c("prior" = "darkgreen", "posterior" = "red")) + 
+  scale_color_manual(values = c("prior" = "darkgreen", "posterior" = "red")) + 
+  facet_wrap(~parameter, scales = "free") + 
+  labs(title = "Prior and Posterior Densities of Coefficients (Conjugate Case)",
+       x = "Value", y = "Density")
+
+print(p1)
+
+
+```
+
+# 3) DIAGNOSTIC
+
+## 3.1) Trace plots
+
+```{r}
+beta_post_mcmc   = as.mcmc(out$beta_post)
+sigma2_post_mcmc = as.mcmc(out$sigma2_post)
+
+# Traccia i plot
+traceplot(beta_post_mcmc)
+traceplot(sigma2_post_mcmc)
+```
+## 3.2) Autocorrelation tests
+
+```{r}
+coda::autocorr.plot(beta_post_mcmc)
+coda::autocorr.plot(sigma2_post_mcmc)
+```
+
+## 3.3) Geweke test
+
+```{r}
+geweke_beta <- apply(beta_post_mcmc, 2, function(x) geweke.diag(mcmc(x)))
+geweke_sigma2 <- geweke.diag(mcmc(sigma2_post_mcmc))
+
+# Estrai i valori z
+z_scores_beta <- sapply(geweke_beta, function(x) x$z)
+z_scores_sigma2 <- geweke_sigma2$z
+
+# Convertire i risultati in data frame per ggplot2
+df_beta <- data.frame(Parameter = paste0("Beta[", 1:6, "]"), Z_Score = z_scores_beta)
+df_sigma2 <- data.frame(Parameter = "Sigma2", Z_Score = z_scores_sigma2)
+
+# Combinare i data frame
+df_combined <- rbind(df_beta, df_sigma2)
+
+# Grafico dei valori z del test di Geweke
+ggplot(df_combined, aes(x = Parameter, y = Z_Score)) +
+  geom_point(alpha = 0.5) +
+  geom_hline(yintercept = c(-1.96, 1.96), linetype = "dashed", color = "red") +
+  labs(title = "Geweke Diagnostic Z-Scores",
+       x = "Parameter",
+       y = "Z-Score") +
+  theme_minimal()
+```
+
+# 4) MODEL / VARIABLE SELECTION
+
+## 4.1) Function for marginal likelihood
+
+```{r}
+#######################################
+## Computing the marginal likelihood ##
+#######################################
+
+marg_like_regr = function(y, X, beta.0, V, a, b){
+  
+  ###########
+  ## Input ##
+  ###########
+  
+  # y     : response variable, (n,1) vector
+  # X     : (n,p) design matrix, each column is one predictor, column one is the unit vector
+  
+  # beta.0, V : hyperparameters of the Multivariate Normal prior on beta
+  # a, b      : hyperparameters of the Gamma prior on tau
+  
+  
+  ############
+  ## Output ##
+  ############
+  
+  # m : the log-marginal likelihood
+  
+  X = as.matrix(X)
+  V = as.matrix(V)
+  
+  n = nrow(X)
+  p = ncol(X)
+  
+  ## Compute posterior hyperparameters
+  
+  V.n    = V + t(X)%*%X
+  beta.n = solve(V + t(X)%*%X)%*%(V%*%beta.0 + t(X)%*%y)
+  
+  a.n = a + n
+  b.n = b + t(y)%*%y + beta.0%*%V%*%beta.0 - t(beta.n)%*%(V + t(X)%*%X)%*%beta.n
+  
+  ## Compute the log-marginal likelihood
+  
+  m = -n/2*log(2*pi) + a/2*log(b/2) - a.n/2*log(b.n/2) +
+        lgamma(a.n/2) - lgamma(a/2) +
+          log(det(V))/2 - log(det(V.n))/2
+  
+  return(m)
+  
+}
+```
+
+## 4.2) Model selection with uniform prior
+
+```{r}
+## Find all the possible distinct models with q predictors, q = 1,2,3,...
+
+
+
+set = 2:p # labels of variables (intercept, i.e. variable 1 is always included)
+
+combn(set, 1)
+
+1:length(set)
+
+comb = unlist(lapply(1:length(set), combinat::combn, x = set, simplify = FALSE), recursive = FALSE)
+
+tail(comb)
+
+## Obs: the intercept X[,1] must be included in each the 2^9 models
+
+## We add it and also include the model with the intercept only
+
+all.comb = mapply(append, 1, comb, SIMPLIFY = FALSE)
+
+all.models.index = append(1, all.comb)
+head(all.models.index)
+
+
+##################################
+## Compute marginal likelihoods ##
+##################################
+
+all.log.marg.like = c()
+
+K = length(all.models.index)
+
+beta.0 = rep(0, p)
+V      = diag(0.01, p)
+a      = 0.01
+b      = 0.01
+
+k = 1
+
+for(k in 1:K){
+  
+  set.k = all.models.index[[k]]
+  
+  all.log.marg.like[k] = marg_like_regr(y, X[,set.k], beta.0[set.k], V[set.k,set.k], a, b)
+  
+}
+
+## Obs: we assume the uniform prior on M_k
+
+all.marg.like = exp(all.log.marg.like)
+
+post.model.probs = all.marg.like/sum(all.marg.like)
+
+
+# alternative: use scale!
+
+
+scale(all.log.marg.like, center = TRUE, scale = FALSE)
+
+const = max(all.log.marg.like)
+all.marg.like = exp(all.log.marg.like - const)  # Usa una costante per la stabilità numerica
+post.model.probs = all.marg.like / sum(all.marg.like)
+
+names(post.model.probs) = all.models.index
+
+head(post.model.probs)
+
+round(post.model.probs, 3)
+
+head(sort(post.model.probs, decreasing = TRUE))
+
+par(mar=c(5,12,1,1))
+barplot(sort(post.model.probs, decreasing = TRUE)[1:10], horiz = TRUE, las = 2, xlim = c(0,1), col = rainbow(8))
+
+# Compare with BSS and with R squared and adjusted R squared
+
+#####
+#####
+
+set = 1:6
+
+lapply(1:length(set), combinat::combn, x = set, simplify = FALSE)
+lapply(1:length(set), combinat::combn, x = set, simplify = TRUE)
+
+comb = unlist(lapply(1:length(set), combinat::combn, x = set, simplify = FALSE), recursive = FALSE)
+```
+
+## 4.3) Model selection with binomial prior
+
+```{r}
+##############################################
+## Create a jags object containing the data ##
+##############################################
+
+library(R2jags)
+
+jags_data = with(data, list(y = y, X = X, n = length(y), p = ncol(X)))
+
+#################################
+## Write likelihood and priors ##
+#################################
+
+linear_regr_jags = function(){
+  
+  
+  
+  # Gamma prior to tau
+  
+  tau ~ dgamma(0.01, 0.01)
+  
+  # Likelihood:
+  
+  for(i in 1:n){
+    
+    y[i] ~ dnorm(mu[i], tau)
+    mu[i] = (gamma*beta)%*%X[i,]
+  }
+  
+  # Priors:
+  
+  for(j in 1:p){
+    
+    beta[j] ~ dnorm(0, tau*0.01)
+    
+  }
+  
+  for(j in 1:p){
+    
+    gamma[j] ~ dbern(w)
+    
+  }
+  
+  w ~ dbeta(1, 1)
+  
+}
+
+
+#########################################
+## Set initial values for beta and tau ##
+#########################################
+
+init_values = function(){
+  
+  list(beta = rep(0, p), gamma = rep(1, p))
+  
+}
+
+
+#########################################################################
+## Specify for which parameters we want to perform posterior inference ##
+#########################################################################
+
+params = c("beta", "gamma")
+
+
+####################################
+## Finally, run the jags function ##
+####################################
+
+
+jags_posterior = jags(data = jags_data,
+                      inits = init_values,
+                      parameters.to.save = params,
+                      model.file = linear_regr_jags,
+                      n.chains = 1,
+                      n.iter = 1000,
+                      n.burnin = 100,
+                      n.thin = 1)
+
+
+out = jags_posterior$BUGSoutput
+
+str(out)
+
+## Extract samples from the posterior of beta and gamma
+
+beta_post  = out$sims.list$beta
+gamma_post = out$sims.list$gamma
+
+head(gamma_post)
+
+dim(gamma_post)
+
+S = nrow(gamma_post)
+
+## Estimate the posterior probability of inclusion of each predictor Xj
+## i.e. proportion of times gammaj = 1
+
+# Calcola la proporzione di inclusione per ciascun predittore
+prob_inclusion <- colMeans(gamma_post)
+
+# Nomina le proporzioni con i nomi delle variabili
+names(prob_inclusion) <- c("Intercept", colnames(X)[-1])
+
+
+
+# Plot delle proporzioni di inclusione
+par(mfrow = c(1, 1), mar = c(5, 5, 2, 2))
+barplot_heights <- barplot(prob_inclusion, col = "brown3", ylab = expression(hat(p)[j]), space = 0.4, names.arg = rep("", length(prob_inclusion)))
+
+# Aggiungere le etichette verticali
+text(x = barplot_heights, y = par("usr")[3] - 0.01, srt = 90, adj = 1, labels = names(prob_inclusion), xpd = TRUE, cex = 0.7)
+```
+
+# 5) PREDICTIONS
+
+```{r}
+library(bayesplot)
+
+post_beta_jags = as.matrix(beta_post_mcmc)
+post_tau_jags = as.matrix(sigma2_post_mcmc)
+# Assuming you have the following objects already:
+# post_beta_jags: matrix of posterior samples for coefficients (iterations x predictors)
+# post_tau_jags: vector of posterior samples for precision (iterations)
+# y: observed values of the dependent variable
+# X: design matrix (predictors)
+
+# Number of posterior samples
+n_samples <- nrow(beta_post_mcmc)
+
+# Number of observations
+n_obs <- length(y)
+
+# Generate posterior predictive samples
+posterior_predictive <- matrix(0, n_samples, n_obs)
+
+for (i in 1:n_samples) {
+  # Calculate the mean of the predictive distribution
+  y_pred_mean <-   X %*% post_beta_jags[i, ] 
+  # Calculate the standard deviation (since precision is the reciprocal of variance)
+  y_pred_sd <- sqrt(as.vector(post_tau_jags[i]))
+  # Generate predictive samples
+  posterior_predictive[i, ] <- rnorm(n_obs, y_pred_mean, y_pred_sd)
+}
+
+# Convert observed values to a matrix for compatibility with bayesplot
+y_matrix <- matrix(y, ncol = length(y))
+
+# Plot Posterior Predictive Checks
+color_scheme_set("blue")
+ppc_dens_overlay(y, posterior_predictive)
+```
+## Predictions for us
+
+```{r}
+x_new = c(1,8,90,1,7,0)
+
+# Compute mu
+
+mu = beta_post_mcmc%*%x_new # S values of mu
+
+head(mu)
+
+y_pred = rnorm(S, mu, sqrt(sigma2_post_mcmc))
+
+hist(y_pred)
+```
+
